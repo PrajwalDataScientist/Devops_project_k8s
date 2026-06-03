@@ -1,0 +1,153 @@
+pipeline {
+    agent any
+
+    tools {
+        maven "maven"
+        jdk "jdk"
+    }
+
+    environment {
+        SCANNER = tool 'sonar'
+    }
+
+    stages {
+
+        stage('Git Checkout') {
+            steps {
+                git branch: 'main', url: 'https://github.com/PrajwalDataScientist/Devops_project_k8s.git'
+            }
+        }
+
+        stage('Compile') {
+            steps {
+                sh "mvn compile"
+            }
+        }
+
+        stage('Test') {
+            steps {
+                sh "mvn test"
+            }
+        }
+
+        stage('Scan File System') {
+            steps {
+                sh "trivy fs --format table -o trivy_filesystemscan.html ."
+            }
+        }
+
+        stage('Sonar Scan') {
+            steps {
+                withSonarQubeEnv('sonar10') {
+                    sh "$SCANNER/bin/sonar-scanner -Dsonar.projectName=devops -Dsonar.projectKey=devops"
+                }
+            }
+        }
+
+        stage('Quality Gate') {
+            steps {
+                script {
+                    waitForQualityGate abortPipeline: false
+                }
+            }
+        }
+
+        stage('Build') {
+            steps {
+                sh "mvn package"
+            }
+        }
+
+        stage('Publish to Nexus') {
+            steps {
+                withMaven(mavenSettingsConfig: 'maven-settings') {
+                    sh 'mvn clean deploy -X'
+                }
+            }
+        }
+
+        stage('Build Docker Image') {
+            steps {
+                script {
+                    sh 'docker build -t prajwal1027/database-app:latest .'
+                }
+            }
+        }
+
+        stage('Scan Docker Image') {
+            steps {
+                sh "trivy image --format table -o trivy_dockerimage_scan.html prajwal1027/database-app:latest"
+            }
+        }
+
+        stage('Login to DockerHub') {
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: 'docker1027',
+                    usernameVariable: 'USER',
+                    passwordVariable: 'PASS'
+                )]) {
+                    sh 'echo $PASS | docker login -u $USER --password-stdin'
+                }
+            }
+        }
+
+        stage('Push Docker Image') {
+            steps {
+                sh 'docker push prajwal1027/database-app:latest'
+            }
+        }
+
+        stage("deply in k8s") {
+            steps {
+                withKubeConfig(caCertificate: '', clusterName: 'kubernetes', contextName: '', credentialsId: 'k8s', namespace: 'appr', restrictKubeConfigAccess: false, serverUrl: 'https://10.0.36.113:6443') {
+                    sh "kubectl apply -f deployment-service.yml -n appr --validate=false"
+                }
+            }
+        }
+        
+        stage("verify the deployment") {
+            steps {
+                withKubeConfig(caCertificate: '', clusterName: 'kubernetes', contextName: '', credentialsId: 'k8s', namespace: 'appr', restrictKubeConfigAccess: false, serverUrl: 'https://10.0.36.113:6443') {
+                    sh "kubectl get pods -n appr"
+                    sh "kubectl get svc -n appr"
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            emailext (
+                subject: "SUCCESSFUL: Job '${env.JOB_NAME}' [Build #${env.BUILD_NUMBER}]",
+                body: """<h3>Build Passed Successfully!</h3>
+                         <p><strong>Job:</strong> ${env.JOB_NAME}<br/>
+                         <strong>Build Number:</strong> #${env.BUILD_NUMBER}</p>
+                         <p>The build passed and the Trivy Security Scan report has been attached for your review.</p>
+                         <p>View complete details here: <a href='${env.BUILD_URL}'>${env.BUILD_URL}</a></p>""",
+                attachmentsPattern: 'trivy_dockerimage_scan.html',
+                to: 'prajwa***@gmail.com',
+                mimeType: 'text/html'
+            )
+        }
+
+        failure {
+            emailext (
+                subject: "FAILED: Job '${env.JOB_NAME}' [Build #${env.BUILD_NUMBER}]",
+                body: """<h3>Build Pipeline Failed</h3>
+                         <p><strong>Job:</strong> ${env.JOB_NAME} | <strong>Build:</strong> #${env.BUILD_NUMBER}</p>
+                         <hr/>
+                         <h4>❌ Test Failures Summary:</h4>
+                         <pre style="background-color: #f8d7da; padding: 15px; border: 1px solid #f5c6cb; border-radius: 4px;">
+\${FAILED_TESTS}
+                         </pre>
+                         <hr/>
+                         <p>The build artifacts, test logs, and the Trivy Security Scan report have been attached to this email.</p>
+                         <p>Review full log in Jenkins: <a href='${env.BUILD_URL}console'>Open Console Log</a></p>""",
+                attachmentsPattern: 'trivy_dockerimage_scan.html',
+                to: 'prajwal***@gmail.com',
+                mimeType: 'text/html'
+            )
+        }
+    }
+}
